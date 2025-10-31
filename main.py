@@ -9,7 +9,7 @@ from datetime import datetime
 
 st.set_page_config(page_title="주민등록인구 시각화", layout="wide")
 
-CSV_PATH = "/mnt/data/202509_202509_주민등록인구및세대현황_월간 (1).csv"
+CSV_PATH = "/mnt/data/202509_202509_주민등록인구및세대현황_월간.csv"
 
 @st.cache_data
 def load_data(path):
