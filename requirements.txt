@@ -1,0 +1,162 @@
+# app.py
+# 주민등록 인구 및 세대 현황 시각화 (Plotly + Streamlit 안정 버전)
+
+import streamlit as st
+import pandas as pd
+import os
+import sys
+import subprocess
+from datetime import datetime
+
+# ✅ Plotly가 없을 경우 자동 설치
+try:
+    import plotly.express as px
+except ModuleNotFoundError:
+    subprocess.check_call([sys.executable, "-m", "pip", "install", "plotly"])
+    import plotly.express as px
+
+# 앱 설정
+st.set_page_config(page_title="주민등록 인구 시각화", layout="wide")
+
+st.title("📊 주민등록 인구 및 세대 현황 시각화 (Plotly 버전)")
+
+# 파일 업로드 또는 기본 경로 사용
+uploaded_file = st.file_uploader("CSV 파일을 업로드하세요", type=["csv"])
+default_path = "202509_202509_주민등록인구및세대현황_월간 (1).csv"
+
+if uploaded_file is not None:
+    path = uploaded_file
+else:
+    if os.path.exists(default_path):
+        path = default_path
+    else:
+        st.info("CSV 파일을 업로드하거나, 기본 파일이 경로에 존재해야 합니다.")
+        st.stop()
+
+# 데이터 불러오기
+@st.cache_data
+def load_data(file):
+    for enc in ("utf-8-sig", "cp949", "euc-kr", "utf-8"):
+        try:
+            df = pd.read_csv(file, encoding=enc)
+            return df
+        except Exception:
+            continue
+    raise ValueError("CSV 파일을 읽을 수 없습니다. 인코딩 또는 파일 내용을 확인하세요.")
+
+try:
+    df = load_data(path)
+except Exception as e:
+    st.error(f"파일 불러오기 실패: {e}")
+    st.stop()
+
+st.success("✅ 데이터 불러오기 성공!")
+st.write(f"데이터 행 수: {len(df):,}")
+
+# 컬럼 전처리
+df.columns = [c.strip() for c in df.columns]
+
+# 기간 컬럼 탐색
+period_col = next((c for c in df.columns if any(k in c for k in ["기간", "연월", "기준년월"])), None)
+if period_col:
+    df["기간"] = pd.to_datetime(df[period_col].astype(str).str[:6], format="%Y%m", errors="coerce")
+else:
+    df["기간"] = pd.NaT
+
+# 주요 컬럼 추정
+def find_col(keyword_list):
+    for k in keyword_list:
+        for c in df.columns:
+            if k in c:
+                return c
+    return None
+
+sido_col = find_col(["시도"])
+gungu_col = find_col(["시군구", "구"])
+sex_col = find_col(["성별"])
+age_col = find_col(["연령", "나이"])
+pop_col = find_col(["인구"])
+house_col = find_col(["세대"])
+
+# 🔹 사이드바 필터
+st.sidebar.header("필터")
+
+if sido_col:
+    sido_vals = sorted(df[sido_col].dropna().unique())
+    sido_sel = st.sidebar.multiselect("시도 선택", sido_vals, default=sido_vals[:3])
+else:
+    sido_sel = []
+
+if gungu_col:
+    if sido_sel:
+        gungu_vals = sorted(df[df[sido_col].isin(sido_sel)][gungu_col].dropna().unique())
+    else:
+        gungu_vals = sorted(df[gungu_col].dropna().unique())
+    gungu_sel = st.sidebar.multiselect("시군구 선택", gungu_vals)
+else:
+    gungu_sel = []
+
+if sex_col:
+    sex_vals = sorted(df[sex_col].dropna().unique())
+    sex_sel = st.sidebar.multiselect("성별 선택", sex_vals, default=sex_vals)
+else:
+    sex_sel = []
+
+if df["기간"].notna().any():
+    min_date, max_date = df["기간"].min(), df["기간"].max()
+    date_range = st.sidebar.date_input("기간 선택", (min_date.date(), max_date.date()))
+else:
+    date_range = None
+
+# 🔹 필터 적용
+mask = pd.Series(True, index=df.index)
+if sido_col and sido_sel:
+    mask &= df[sido_col].isin(sido_sel)
+if gungu_col and gungu_sel:
+    mask &= df[gungu_col].isin(gungu_sel)
+if sex_col and sex_sel:
+    mask &= df[sex_col].isin(sex_sel)
+if date_range:
+    start, end = date_range
+    mask &= (df["기간"] >= pd.to_datetime(start)) & (df["기간"] <= pd.to_datetime(end))
+
+df_f = df[mask].copy()
+
+# 🔹 요약
+st.subheader("요약 정보")
+if pop_col:
+    total_pop = pd.to_numeric(df_f[pop_col], errors="coerce").sum()
+    st.metric("총 인구수", f"{int(total_pop):,}")
+if house_col:
+    total_house = pd.to_numeric(df_f[house_col], errors="coerce").sum()
+    st.metric("총 세대수", f"{int(total_house):,}")
+
+# 🔹 Plotly 그래프
+if pop_col and df_f["기간"].notna().any():
+    st.subheader("📈 인구 시계열 추이")
+    ts = df_f.groupby("기간")[pop_col].apply(lambda s: pd.to_numeric(s, errors="coerce").sum()).reset_index()
+    fig = px.line(ts, x="기간", y=pop_col, title="기간별 인구 변화", markers=True)
+    fig.update_layout(template="plotly_white")
+    st.plotly_chart(fig, use_container_width=True)
+
+if age_col and pop_col and sex_col:
+    st.subheader("👥 연령대 및 성별 분포")
+    agg = df_f.groupby([age_col, sex_col])[pop_col].apply(lambda s: pd.to_numeric(s, errors="coerce").sum()).reset_index()
+    fig = px.bar(agg, x=age_col, y=pop_col, color=sex_col, barmode="group", title="연령대별 성별 인구 분포")
+    fig.update_layout(template="plotly_white")
+    st.plotly_chart(fig, use_container_width=True)
+
+if sido_col and pop_col:
+    st.subheader("🏙️ 시도별 인구수 상위 20")
+    rank = df_f.groupby(sido_col)[pop_col].apply(lambda s: pd.to_numeric(s, errors="coerce").sum()).reset_index()
+    rank = rank.sort_values(by=pop_col, ascending=False).head(20)
+    fig = px.bar(rank, x=sido_col, y=pop_col, title="시도별 인구수 TOP 20", color=pop_col)
+    fig.update_layout(template="plotly_white")
+    st.plotly_chart(fig, use_container_width=True)
+
+# 다운로드
+st.download_button("📥 필터된 데이터 CSV 다운로드", df_f.to_csv(index=False).encode("utf-8-sig"),
+                   file_name="filtered_population.csv", mime="text/csv")
+
+st.sidebar.markdown("---")
+st.sidebar.info("Plotly 기반 인터랙티브 대시보드. 지도 시각화도 추가할 수 있습니다.")
